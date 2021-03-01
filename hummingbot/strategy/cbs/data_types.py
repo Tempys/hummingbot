@@ -41,8 +41,9 @@ class CbsProposal:
     """
     An arbitrage proposal which contains 2 sides of the proposal - one buy and one sell.
     """
-    def __init__(self, first_side: CbsProposalSide, second_side: CbsProposalSide):
-        if first_side.is_buy == second_side.is_buy:
-            raise Exception("first_side and second_side must be on different side of buy and sell.")
+    def __init__(self, first_side: CbsProposalSide):
         self.first_side: CbsProposalSide = first_side
-        self.second_side: CbsProposalSide = second_side
+
+
+    def __repr__(self):
+        return f"First Side - {self.first_side}\n"

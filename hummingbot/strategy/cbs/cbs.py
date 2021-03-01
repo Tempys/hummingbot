@@ -14,7 +14,7 @@ from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.client.settings import ETH_WALLET_CONNECTORS
 from hummingbot.connector.connector.uniswap.uniswap_connector import UniswapConnector
 
-from .utils import create_arb_proposals, ArbProposal
+from .utils import create_cbs_proposals, CbsProposal
 
 
 NaN = float("nan")
@@ -68,10 +68,6 @@ class CbsStrategy(StrategyPyBase):
         self._market_1_quote_eth_rate = None
 
     @property
-    def min_profitability(self) -> Decimal:
-        return self._min_profitability
-
-    @property
     def order_amount(self) -> Decimal:
         return self._order_amount
 
@@ -104,93 +100,23 @@ class CbsStrategy(StrategyPyBase):
         The main procedure for the cbs strategy. It first creates arbitrage proposals, then finally execute the
         arbitrage.
         """
-        self._arb_proposals = await create_arb_proposals(self._market_info_1, self._order_amount)
-        arb_proposals = [
-            t.copy() for t in self._arb_proposals
-            if t.profit_pct(
-                account_for_fee=True,
-                first_side_quote_eth_rate=self._market_1_quote_eth_rate,
-                second_side_quote_eth_rate=self._market_2_quote_eth_rate
-            ) >= self._min_profitability
-        ]
-        if len(arb_proposals) == 0:
-            if self._last_no_arb_reported < self.current_timestamp - 20.:
-                self.logger().info("No arbitrage opportunity.\n" +
-                                   "\n".join(self.short_proposal_msg(self._arb_proposals, False)))
-                self._last_no_arb_reported = self.current_timestamp
-            return
-        self.apply_slippage_buffers(arb_proposals)
-        self.apply_budget_constraint(arb_proposals)
-        await self.execute_arb_proposals(arb_proposals)
+        self._cbs_proposals = await create_cbs_proposals(self._market_info_1, self._order_amount)
+        await self.execute_arb_proposals(self._cbs_proposals)
 
-    def apply_slippage_buffers(self, arb_proposals: List[ArbProposal]):
-        """
-        Updates arb_proposals by adjusting order price for slipper buffer percentage.
-        E.g. if it is a buy order, for an order price of 100 and 1% slipper buffer, the new order price is 101,
-        for a sell order, the new order price is 99.
-        :param arb_proposals: the arbitrage proposal
-        """
-        for arb_proposal in arb_proposals:
-            for arb_side in (arb_proposal.first_side, arb_proposal.second_side):
-                market = arb_side.market_info.market
-                arb_side.amount = market.quantize_order_amount(arb_side.market_info.trading_pair, arb_side.amount)
-                s_buffer = self._market_1_slippage_buffer if market == self._market_info_1.market \
-                    else self._market_2_slippage_buffer
-                if not arb_side.is_buy:
-                    s_buffer *= Decimal("-1")
-                arb_side.order_price *= Decimal("1") + s_buffer
-                arb_side.order_price = market.quantize_order_price(arb_side.market_info.trading_pair,
-                                                                   arb_side.order_price)
-
-    def apply_budget_constraint(self, arb_proposals: List[ArbProposal]):
-        """
-        Updates arb_proposals by setting proposal amount to 0 if there is not enough balance to submit order with
-        required order amount.
-        :param arb_proposals: the arbitrage proposal
-        """
-        for arb_proposal in arb_proposals:
-            for arb_side in (arb_proposal.first_side, arb_proposal.second_side):
-                market = arb_side.market_info.market
-                token = arb_side.market_info.quote_asset if arb_side.is_buy else arb_side.market_info.base_asset
-                balance = market.get_available_balance(token)
-                required = arb_side.amount * arb_side.order_price if arb_side.is_buy else arb_side.amount
-                if balance < required:
-                    arb_side.amount = s_decimal_zero
-                    self.logger().info(f"Can't arbitrage, {market.display_name} "
-                                       f"{token} balance "
-                                       f"({balance}) is below required order amount ({required}).")
-                    continue
-
-    async def execute_arb_proposals(self, arb_proposals: List[ArbProposal]):
+    async def execute_arb_proposals(self, arb_proposals: List[CbsProposal]):
         """
         Execute both sides of the arbitrage trades. If concurrent_orders_submission is False, it will wait for the
         first order to fill before submit the second order.
         :param arb_proposals: the arbitrage proposal
         """
         for arb_proposal in arb_proposals:
-            if any(p.amount <= s_decimal_zero for p in (arb_proposal.first_side, arb_proposal.second_side)):
+            if any(p.amount <= s_decimal_zero for p in (arb_proposal.first_side,)):
                 continue
             self.logger().info(f"Found arbitrage opportunity!: {arb_proposal}")
-            for arb_side in (arb_proposal.first_side, arb_proposal.second_side):
-                if not self._concurrent_orders_submission and arb_side == arb_proposal.second_side:
-                    await self._first_order_done_event.wait()
-                    if not self._first_order_succeeded:
-                        self._first_order_succeeded = None
-                        continue
-                    self._first_order_succeeded = None
-                side = "BUY" if arb_side.is_buy else "SELL"
+            for arb_side in (arb_proposal.first_side,):
                 self.log_with_clock(logging.INFO,
-                                    f"Placing {side} order for {arb_side.amount} {arb_side.market_info.base_asset} "
+                                    f"Logging order for {arb_side.amount} {arb_side.market_info.base_asset} "
                                     f"at {arb_side.market_info.market.display_name} at {arb_side.order_price} price")
-                place_order_fn = self.buy_with_specific_market if arb_side.is_buy else self.sell_with_specific_market
-                order_id = place_order_fn(arb_side.market_info,
-                                          arb_side.amount,
-                                          arb_side.market_info.market.get_taker_order_type(),
-                                          arb_side.order_price,
-                                          )
-                if not self._concurrent_orders_submission and arb_side == arb_proposal.first_side:
-                    self._first_order_id = order_id
-                    self._first_order_done_event = asyncio.Event()
 
     def ready_for_new_cbs_trades(self) -> bool:
         """
@@ -201,24 +127,6 @@ class CbsStrategy(StrategyPyBase):
             if len(self.market_info_to_active_orders.get(market_info, [])) > 0:
                 return False
         return True
-
-    def short_proposal_msg(self, arb_proposal: List[ArbProposal], indented: bool = True) -> List[str]:
-        """
-        Composes a short proposal message.
-        :param arb_proposal: The arbitrage proposal
-        :param indented: If the message should be indented (by 4 spaces)
-        :return A list of messages
-        """
-        lines = []
-        for proposal in arb_proposal:
-            side1 = "buy" if proposal.first_side.is_buy else "sell"
-            side2 = "buy" if proposal.second_side.is_buy else "sell"
-            profit_pct = proposal.profit_pct(True, first_side_quote_eth_rate=self._market_1_quote_eth_rate,
-                                             second_side_quote_eth_rate = self._market_2_quote_eth_rate)
-            lines.append(f"{'    ' if indented else ''}{side1} at {proposal.first_side.market_info.market.display_name}"
-                         f", {side2} at {proposal.second_side.market_info.market.display_name}: "
-                         f"{profit_pct:.2%}")
-        return lines
 
     async def format_status(self) -> str:
         """
@@ -261,26 +169,6 @@ class CbsStrategy(StrategyPyBase):
             lines.extend(["", "*** WARNINGS ***"] + warning_lines)
 
         return "\n".join(lines)
-
-    def did_complete_buy_order(self, order_completed_event):
-        self.first_order_done(order_completed_event, True)
-
-    def did_complete_sell_order(self, order_completed_event):
-        self.first_order_done(order_completed_event, True)
-
-    def did_fail_order(self, order_failed_event):
-        self.first_order_done(order_failed_event, False)
-
-    def did_cancel_order(self, cancelled_event):
-        self.first_order_done(cancelled_event, False)
-
-    def did_expire_order(self, expired_event):
-        self.first_order_done(expired_event, False)
-
-    def first_order_done(self, event, succeeded):
-        if self._first_order_done_event is not None and event.order_id == self._first_order_id:
-            self._first_order_done_event.set()
-            self._first_order_succeeded = succeeded
 
     @property
     def tracked_limit_orders(self) -> List[Tuple[ConnectorBase, LimitOrder]]:
