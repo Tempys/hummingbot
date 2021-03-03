@@ -1,7 +1,6 @@
-from decimal import Decimal
-from hummingbot.strategy.market_trading_pair_tuple import MarketTradingPairTuple
-from hummingbot.strategy.cbs.cbs import CbsStrategy
 from hummingbot.strategy.amm_arb.amm_arb_config_map import amm_arb_config_map
+from hummingbot.strategy.cbs.cbs import CbsStrategy
+from hummingbot.strategy.market_trading_pair_tuple import MarketTradingPairTuple
 
 
 def start(self):

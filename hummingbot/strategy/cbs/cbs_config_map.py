@@ -1,15 +1,12 @@
-from hummingbot.client.config.config_var import ConfigVar
 from hummingbot.client.config.config_validators import (
-    validate_connector,
-    validate_decimal,
-    validate_bool
+    validate_connector
 )
+from hummingbot.client.config.config_var import ConfigVar
 from hummingbot.client.settings import (
     required_exchanges,
     requried_connector_trading_pairs,
     EXAMPLE_PAIRS,
 )
-from decimal import Decimal
 
 
 def exchange_on_validated(value: str) -> None:

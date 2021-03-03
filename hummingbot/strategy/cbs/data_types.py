@@ -1,6 +1,6 @@
 from decimal import Decimal
+
 from hummingbot.strategy.market_trading_pair_tuple import MarketTradingPairTuple
-from hummingbot.core.utils.estimate_fee import estimate_fee
 
 s_decimal_nan = Decimal("NaN")
 s_decimal_0 = Decimal("0")
@@ -10,6 +10,7 @@ class CbsProposalSide:
     """
         An  proposal side which contains info needed for order submission.
         """
+
     def __init__(self,
                  market_info: MarketTradingPairTuple,
                  is_buy: bool,
@@ -36,14 +37,13 @@ class CbsProposalSide:
                f"Order Price: {self.order_price}  Amount: {self.amount}"
 
 
-
 class CbsProposal:
     """
     An arbitrage proposal which contains 2 sides of the proposal - one buy and one sell.
     """
+
     def __init__(self, first_side: CbsProposalSide):
         self.first_side: CbsProposalSide = first_side
-
 
     def __repr__(self):
         return f"First Side - {self.first_side}\n"
