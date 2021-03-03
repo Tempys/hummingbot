@@ -1,0 +1,12 @@
+##########################################
+###   AMM Arbitrage strategy config   ###
+##########################################
+
+template_version: 1
+strategy: null
+
+# The following configuations are only required for the AMM arbitrage trading strategy
+# Connectors and markets parameters
+connector_1: null
+market_1: null
+order_amount: null
