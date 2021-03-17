@@ -13,21 +13,33 @@ from hummingbot.strategy.strategy_py_base import StrategyPyBase
 from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.client.settings import ETH_WALLET_CONNECTORS
 from hummingbot.connector.connector.uniswap.uniswap_connector import UniswapConnector
-
 from .utils import create_cbs_proposals, CbsProposal
-
 
 NaN = float("nan")
 s_decimal_zero = Decimal(0)
 cbs_logger = None
+is_previous_side_trade_buy = True
 
 
 class CbsStrategy(StrategyPyBase):
+
+
     """
     This is a basic arbitrage strategy which can be used for most types of connectors (CEX, DEX or AMM).
     For a given order amount, the strategy checks both sides of the trade (market_1 and market_2) for arb opportunity.
     If presents, the strategy submits taker orders to both market.
     """
+    @classmethod
+    def get_previous_side_trade_buy(cls):
+        global is_previous_side_trade_buy
+        return is_previous_side_trade_buy
+
+
+    @classmethod
+    def is_previous_side_trade_buy(cls, value):
+        global is_previous_side_trade_buy
+        is_previous_side_trade_buy = value
+
 
     @classmethod
     def logger(cls) -> HummingbotLogger:
@@ -35,6 +47,7 @@ class CbsStrategy(StrategyPyBase):
         if cbs_logger is None:
             cbs_logger = logging.getLogger(__name__)
         return cbs_logger
+
 
     def __init__(self,
                  market_info_1: MarketTradingPairTuple,
@@ -66,18 +79,23 @@ class CbsStrategy(StrategyPyBase):
         self._uniswap = None
         self._quote_eth_rate_fetch_loop_task = None
         self._market_1_quote_eth_rate = None
+        self._is_previous_side_trade_buy = True
+
 
     @property
     def order_amount(self) -> Decimal:
         return self._order_amount
 
+
     @order_amount.setter
     def order_amount(self, value):
         self._order_amount = value
 
+
     @property
     def market_info_to_active_orders(self) -> Dict[MarketTradingPairTuple, List[LimitOrder]]:
         return self._sb_order_tracker.market_pair_to_active_orders
+
 
     def tick(self, timestamp: float):
         """
@@ -95,6 +113,7 @@ class CbsStrategy(StrategyPyBase):
             if self._main_task is None or self._main_task.done():
                 self._main_task = safe_ensure_future(self.main())
 
+
     async def main(self):
         """
         The main procedure for the cbs strategy. It first creates arbitrage proposals, then finally execute the
@@ -102,6 +121,7 @@ class CbsStrategy(StrategyPyBase):
         """
         self._cbs_proposals = await create_cbs_proposals(self._market_info_1, self._order_amount)
         await self.execute_arb_proposals(self._cbs_proposals)
+
 
     async def execute_arb_proposals(self, arb_proposals: List[CbsProposal]):
         """
@@ -118,6 +138,17 @@ class CbsStrategy(StrategyPyBase):
                                     f"Logging order for {arb_side.amount} {arb_side.market_info.base_asset} "
                                     f"at {arb_side.market_info.market.display_name} at {arb_side.order_price} price")
 
+                self.logger().info(f"side : {self.get_previous_side_trade_buy()}")
+                if arb_side.is_buy is True and arb_side.order_price > 0.18 and self.get_previous_side_trade_buy():
+                    self.logger().info(f"start sell tokens")
+                    self.is_previous_side_trade_buy(False)
+                    self.logger().info(f"finish sell tokens: {self.get_previous_side_trade_buy()}")
+                elif arb_side.order_price < 0.1 and self.get_previous_side_trade_buy() is not True:
+                    self.logger().info(f"start buy tokens")
+                    self.is_previous_side_trade_buy(True)
+                    self.logger().info(f"finish sell tokens: {self.get_previous_side_trade_buy()}")
+
+
     def ready_for_new_cbs_trades(self) -> bool:
         """
         Returns True if there is no outstanding unfilled order.
@@ -127,6 +158,7 @@ class CbsStrategy(StrategyPyBase):
             if len(self.market_info_to_active_orders.get(market_info, [])) > 0:
                 return False
         return True
+
 
     async def format_status(self) -> str:
         """
@@ -170,17 +202,21 @@ class CbsStrategy(StrategyPyBase):
 
         return "\n".join(lines)
 
+
     @property
     def tracked_limit_orders(self) -> List[Tuple[ConnectorBase, LimitOrder]]:
         return self._sb_order_tracker.tracked_limit_orders
+
 
     @property
     def tracked_market_orders(self) -> List[Tuple[ConnectorBase, MarketOrder]]:
         return self._sb_order_tracker.tracked_market_orders
 
+
     def start(self, clock: Clock, timestamp: float):
         if self._market_info_1.market.name in ETH_WALLET_CONNECTORS:
             self._quote_eth_rate_fetch_loop_task = safe_ensure_future(self.quote_in_eth_rate_fetch_loop())
+
 
     def stop(self, clock: Clock):
         if self._quote_eth_rate_fetch_loop_task is not None:
@@ -189,6 +225,7 @@ class CbsStrategy(StrategyPyBase):
         if self._main_task is not None:
             self._main_task.cancel()
             self._main_task = None
+
 
     async def quote_in_eth_rate_fetch_loop(self):
         while True:
@@ -208,6 +245,7 @@ class CbsStrategy(StrategyPyBase):
                                       exc_info=True,
                                       app_warning_msg="Could not fetch ETH conversion rate from Gateway API.")
                 await asyncio.sleep(0.5)
+
 
     async def request_rate_in_eth(self, quote: str) -> int:
         if self._uniswap is None:

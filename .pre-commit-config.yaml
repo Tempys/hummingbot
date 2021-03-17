@@ -4,4 +4,4 @@ repos:
     hooks:
     - id: flake8
       types: ['file']
-      files: \.(py|pyx|pxd)$
+      files: \.(pyx|pxd)$
