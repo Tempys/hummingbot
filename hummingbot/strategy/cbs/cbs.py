@@ -19,27 +19,35 @@ NaN = float("nan")
 s_decimal_zero = Decimal(0)
 cbs_logger = None
 is_previous_side_trade_buy = True
+previuos_trade_price = 0
 
 
 class CbsStrategy(StrategyPyBase):
-
-
     """
     This is a basic arbitrage strategy which can be used for most types of connectors (CEX, DEX or AMM).
     For a given order amount, the strategy checks both sides of the trade (market_1 and market_2) for arb opportunity.
     If presents, the strategy submits taker orders to both market.
     """
+
+    @classmethod
+    def get_previuos_trade_price(cls):
+        global previuos_trade_price
+        return previuos_trade_price
+
+    @classmethod
+    def previuos_trade_price(cls, value):
+        global previuos_trade_price
+        previuos_trade_price = value
+
     @classmethod
     def get_previous_side_trade_buy(cls):
         global is_previous_side_trade_buy
         return is_previous_side_trade_buy
 
-
     @classmethod
     def is_previous_side_trade_buy(cls, value):
         global is_previous_side_trade_buy
         is_previous_side_trade_buy = value
-
 
     @classmethod
     def logger(cls) -> HummingbotLogger:
@@ -47,7 +55,6 @@ class CbsStrategy(StrategyPyBase):
         if cbs_logger is None:
             cbs_logger = logging.getLogger(__name__)
         return cbs_logger
-
 
     def __init__(self,
                  market_info_1: MarketTradingPairTuple,
@@ -81,21 +88,29 @@ class CbsStrategy(StrategyPyBase):
         self._market_1_quote_eth_rate = None
         self._is_previous_side_trade_buy = True
 
-
     @property
     def order_amount(self) -> Decimal:
         return self._order_amount
-
 
     @order_amount.setter
     def order_amount(self, value):
         self._order_amount = value
 
-
     @property
     def market_info_to_active_orders(self) -> Dict[MarketTradingPairTuple, List[LimitOrder]]:
         return self._sb_order_tracker.market_pair_to_active_orders
 
+
+
+    def ready_for_new_cbs_trades(self) -> bool:
+        """
+        Returns True if there is no outstanding unfilled order.
+        """
+        # outstanding_orders = self.market_info_to_active_orders.get(self._market_info, [])
+        for market_info in [self._market_info_1]:
+            if len(self.market_info_to_active_orders.get(market_info, [])) > 0:
+                return False
+        return True
 
     def tick(self, timestamp: float):
         """
@@ -119,9 +134,63 @@ class CbsStrategy(StrategyPyBase):
         The main procedure for the cbs strategy. It first creates arbitrage proposals, then finally execute the
         arbitrage.
         """
-        self._cbs_proposals = await create_cbs_proposals(self._market_info_1, self._order_amount)
-        await self.execute_arb_proposals(self._cbs_proposals)
+        self.cbs_proposals = await create_cbs_proposals(self._market_info_1, self._order_amount)
 
+        self.apply_slippage_buffers(self.cbs_proposals)
+        self.apply_budget_constraint(self.cbs_proposals)
+
+        await self.execute_arb_proposals(self.cbs_proposals)
+        await asyncio.sleep(10)
+
+    def apply_budget_constraint(self, arb_proposals: List[CbsProposal]):
+        """
+        Updates arb_proposals by setting proposal amount to 0 if there is not enough balance to submit order with
+        required order amount.
+        :param arb_proposals: the arbitrage proposal
+        """
+        for arb_proposal in arb_proposals:
+            for arb_side in (arb_proposal.first_side,):
+                market = arb_side.market_info.market
+                token = arb_side.market_info.quote_asset if arb_side.is_buy else arb_side.market_info.base_asset
+                balance = market.get_available_balance(token)
+                required = arb_side.amount * arb_side.order_price if arb_side.is_buy else arb_side.amount
+                if balance < required:
+                    arb_side.amount = s_decimal_zero
+                    self.logger().info(f"Can't arbitrage, {market.display_name} "
+                                       f"{token} balance "
+                                       f"({balance}) is below required order amount ({required}).")
+                    continue
+
+    def apply_slippage_buffers(self, arb_proposals: List[CbsProposal]):
+        """
+        Updates arb_proposals by adjusting order price for slipper buffer percentage.
+        E.g. if it is a buy order, for an order price of 100 and 1% slipper buffer, the new order price is 101,
+        for a sell order, the new order price is 99.
+        :param arb_proposals: the arbitrage proposal
+        """
+        for arb_proposal in arb_proposals:
+            for arb_side in (arb_proposal.first_side,):
+                market = arb_side.market_info.market
+                arb_side.amount = market.quantize_order_amount(arb_side.market_info.trading_pair, arb_side.amount)
+                arb_side.order_price = market.quantize_order_price(arb_side.market_info.trading_pair,
+                                                                   arb_side.order_price)
+
+    def profit_pct(self, previousPrice, currentprice, is_previous_side_trade_buy):
+        if previousPrice == 0: return 100
+        return (currentprice / previousPrice * 100 - 100) if is_previous_side_trade_buy else (
+                previousPrice / currentprice * 100 - 100)
+
+    def trade_on_exchange(self, place_order_fn, arb_side):
+        self.log_with_clock(logging.INFO,
+                            f"Logging order for {arb_side.amount} {arb_side.market_info.base_asset} "
+                            f"at {arb_side.market_info.market.display_name} at {arb_side.order_price} price")
+        order_id = place_order_fn(arb_side.market_info,
+                                  arb_side.amount,
+                                  arb_side.market_info.market.get_taker_order_type(),
+                                  arb_side.order_price,
+                                  )
+        self._first_order_id = order_id
+        self._first_order_done_event = asyncio.Event()
 
     async def execute_arb_proposals(self, arb_proposals: List[CbsProposal]):
         """
@@ -134,27 +203,54 @@ class CbsStrategy(StrategyPyBase):
                 continue
             self.logger().info(f"Found arbitrage opportunity!: {arb_proposal}")
             for arb_side in (arb_proposal.first_side,):
-                self.log_with_clock(logging.INFO,
-                                    f"Logging order for {arb_side.amount} {arb_side.market_info.base_asset} "
-                                    f"at {arb_side.market_info.market.display_name} at {arb_side.order_price} price")
+                if (self._first_order_done_event is not None):
+                    await self._first_order_done_event.wait()
+                    if not self._first_order_succeeded:
+                        self._first_order_succeeded = None
+                        continue
+                    self._first_order_succeeded = None
 
-                self.logger().info(f"side : {self.get_previous_side_trade_buy()}")
-                if arb_side.is_buy is True and arb_side.order_price > 0.18 and self.get_previous_side_trade_buy():
+                # TODO: remove global variables
+                prev_price = self.get_previuos_trade_price()
+                profitability = self.profit_pct(prev_price, arb_side.order_price, self.get_previous_side_trade_buy())
+                if arb_side.is_buy is not True and arb_side.order_price > 0.17 and self.get_previous_side_trade_buy() and profitability > 1:
                     self.logger().info(f"start sell tokens")
+                    place_order_fn = self.sell_with_specific_market
+                    self.log_with_clock(logging.INFO,
+                                        f"Logging order for {arb_side.amount} {arb_side.market_info.base_asset} "
+                                        f"at {arb_side.market_info.market.display_name} at {arb_side.order_price} price")
+                    order_id = place_order_fn(arb_side.market_info,
+                                              arb_side.amount,
+                                              arb_side.market_info.market.get_taker_order_type(),
+                                              arb_side.order_price,
+                                              )
+                    self._first_order_id = order_id
                     self.is_previous_side_trade_buy(False)
-                    self.logger().info(f"finish sell tokens: {self.get_previous_side_trade_buy()}")
-                elif arb_side.order_price < 0.1 and self.get_previous_side_trade_buy() is not True:
+                    self._first_order_done_event = asyncio.Event()
+                    self.logger().info(
+                        f"finish sell tokens with the profitalibity in {profitability} amount {arb_side.amount / 100 * profitability} rose")
+                elif arb_side.order_price < 0.16 and self.get_previous_side_trade_buy() is not True and profitability > 1:
                     self.logger().info(f"start buy tokens")
+                    place_order_fn = self.buy_with_specific_market
+                    self.log_with_clock(logging.INFO,
+                                        f"Logging order for {arb_side.amount} {arb_side.market_info.base_asset} "
+                                        f"at {arb_side.market_info.market.display_name} at {arb_side.order_price} price")
+                    order_id = place_order_fn(arb_side.market_info,
+                                              arb_side.amount,
+                                              arb_side.market_info.market.get_taker_order_type(),
+                                              arb_side.order_price,
+                                              )
+                    self._first_order_id = order_id
                     self.is_previous_side_trade_buy(True)
-                    self.logger().info(f"finish sell tokens: {self.get_previous_side_trade_buy()}")
+                    self._first_order_done_event = asyncio.Event()
+                    self.logger().info(f"finish buy tokens in amount  {arb_side.amount / 100 * profitability} ")
 
-
-    def ready_for_new_cbs_trades(self) -> bool:
+    def ready_for_new_arb_trades(self) -> bool:
         """
         Returns True if there is no outstanding unfilled order.
         """
         # outstanding_orders = self.market_info_to_active_orders.get(self._market_info, [])
-        for market_info in [self._market_info_1]:
+        for market_info in [self._market_info_1, self._market_info_2]:
             if len(self.market_info_to_active_orders.get(market_info, [])) > 0:
                 return False
         return True
@@ -202,21 +298,37 @@ class CbsStrategy(StrategyPyBase):
 
         return "\n".join(lines)
 
+    def did_complete_buy_order(self, order_completed_event):
+        self.first_order_done(order_completed_event, True)
+
+    def did_complete_sell_order(self, order_completed_event):
+        self.first_order_done(order_completed_event, True)
+
+    def did_fail_order(self, order_failed_event):
+        self.first_order_done(order_failed_event, False)
+
+    def did_cancel_order(self, cancelled_event):
+        self.first_order_done(cancelled_event, False)
+
+    def did_expire_order(self, expired_event):
+        self.first_order_done(expired_event, False)
+
+    def first_order_done(self, event, succeeded):
+        if self._first_order_done_event is not None and event.order_id == self._first_order_id:
+            self._first_order_done_event.set()
+            self._first_order_succeeded = succeeded
 
     @property
     def tracked_limit_orders(self) -> List[Tuple[ConnectorBase, LimitOrder]]:
         return self._sb_order_tracker.tracked_limit_orders
 
-
     @property
     def tracked_market_orders(self) -> List[Tuple[ConnectorBase, MarketOrder]]:
         return self._sb_order_tracker.tracked_market_orders
 
-
     def start(self, clock: Clock, timestamp: float):
         if self._market_info_1.market.name in ETH_WALLET_CONNECTORS:
             self._quote_eth_rate_fetch_loop_task = safe_ensure_future(self.quote_in_eth_rate_fetch_loop())
-
 
     def stop(self, clock: Clock):
         if self._quote_eth_rate_fetch_loop_task is not None:
@@ -225,7 +337,6 @@ class CbsStrategy(StrategyPyBase):
         if self._main_task is not None:
             self._main_task.cancel()
             self._main_task = None
-
 
     async def quote_in_eth_rate_fetch_loop(self):
         while True:
@@ -236,6 +347,11 @@ class CbsStrategy(StrategyPyBase):
                     self.logger().warning(f"Estimate conversion rate - "
                                           f"{self._market_info_1.quote_asset}:ETH = {self._market_1_quote_eth_rate} ")
 
+                if self._market_info_2.market.name in ETH_WALLET_CONNECTORS and \
+                        "WETH" not in self._market_info_2.trading_pair.split("-"):
+                    self._market_2_quote_eth_rate = await self.request_rate_in_eth(self._market_info_2.quote_asset)
+                    self.logger().warning(f"Estimate conversion rate - "
+                                          f"{self._market_info_2.quote_asset}:ETH = {self._market_2_quote_eth_rate} ")
                 await asyncio.sleep(60 * 5)
             except asyncio.CancelledError:
                 raise
@@ -246,8 +362,8 @@ class CbsStrategy(StrategyPyBase):
                                       app_warning_msg="Could not fetch ETH conversion rate from Gateway API.")
                 await asyncio.sleep(0.5)
 
-
     async def request_rate_in_eth(self, quote: str) -> int:
         if self._uniswap is None:
             self._uniswap = UniswapConnector([f"{quote}-WETH"], "", None)
         return await self._uniswap.get_quote_price(f"{quote}-WETH", True, 1)
+
