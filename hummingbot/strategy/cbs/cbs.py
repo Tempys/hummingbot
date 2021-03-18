@@ -14,12 +14,13 @@ from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.client.settings import ETH_WALLET_CONNECTORS
 from hummingbot.connector.connector.uniswap.uniswap_connector import UniswapConnector
 from .utils import create_cbs_proposals, CbsProposal
+import decimal
 
 NaN = float("nan")
 s_decimal_zero = Decimal(0)
 cbs_logger = None
-is_previous_side_trade_buy = True
-previuos_trade_price = 0
+is_previous_side_trade_buy = False
+previuos_trade_price = decimal.Decimal('0')
 
 
 class CbsStrategy(StrategyPyBase):
@@ -100,8 +101,6 @@ class CbsStrategy(StrategyPyBase):
     def market_info_to_active_orders(self) -> Dict[MarketTradingPairTuple, List[LimitOrder]]:
         return self._sb_order_tracker.market_pair_to_active_orders
 
-
-
     def ready_for_new_cbs_trades(self) -> bool:
         """
         Returns True if there is no outstanding unfilled order.
@@ -128,16 +127,16 @@ class CbsStrategy(StrategyPyBase):
             if self._main_task is None or self._main_task.done():
                 self._main_task = safe_ensure_future(self.main())
 
-
     async def main(self):
         """
         The main procedure for the cbs strategy. It first creates arbitrage proposals, then finally execute the
         arbitrage.
         """
-        self.cbs_proposals = await create_cbs_proposals(self._market_info_1, self._order_amount)
+        self.cbs_proposals = await create_cbs_proposals(self._market_info_1, self._order_amount,
+                                                        self.get_previous_side_trade_buy())
 
         self.apply_slippage_buffers(self.cbs_proposals)
-        self.apply_budget_constraint(self.cbs_proposals)
+        # self.apply_budget_constraint(self.cbs_proposals)
 
         await self.execute_arb_proposals(self.cbs_proposals)
         await asyncio.sleep(10)
@@ -149,6 +148,7 @@ class CbsStrategy(StrategyPyBase):
         :param arb_proposals: the arbitrage proposal
         """
         for arb_proposal in arb_proposals:
+
             for arb_side in (arb_proposal.first_side,):
                 market = arb_side.market_info.market
                 token = arb_side.market_info.quote_asset if arb_side.is_buy else arb_side.market_info.base_asset
@@ -208,12 +208,13 @@ class CbsStrategy(StrategyPyBase):
                     if not self._first_order_succeeded:
                         self._first_order_succeeded = None
                         continue
-                    self._first_order_succeeded = None
 
                 # TODO: remove global variables
                 prev_price = self.get_previuos_trade_price()
                 profitability = self.profit_pct(prev_price, arb_side.order_price, self.get_previous_side_trade_buy())
-                if arb_side.is_buy is not True and arb_side.order_price > 0.17 and self.get_previous_side_trade_buy() and profitability > 1:
+                self.logger().info(
+                    f"for amount: {arb_side.amount} and price {arb_side.order_price} calculates possible profitabity: {profitability} % ,  (side is buy : {arb_side.is_buy} ), previous side trade: {self.get_previous_side_trade_buy()}, ")
+                if arb_side.is_buy is not True and arb_side.order_price > 0.17 and self.get_previous_side_trade_buy() and profitability > 0.5:
                     self.logger().info(f"start sell tokens")
                     place_order_fn = self.sell_with_specific_market
                     self.log_with_clock(logging.INFO,
@@ -226,10 +227,11 @@ class CbsStrategy(StrategyPyBase):
                                               )
                     self._first_order_id = order_id
                     self.is_previous_side_trade_buy(False)
+                    self.previuos_trade_price(arb_side.order_price)
                     self._first_order_done_event = asyncio.Event()
                     self.logger().info(
-                        f"finish sell tokens with the profitalibity in {profitability} amount {arb_side.amount / 100 * profitability} rose")
-                elif arb_side.order_price < 0.16 and self.get_previous_side_trade_buy() is not True and profitability > 1:
+                        f"finish sell tokens with the profitability in {profitability} amount {arb_side.amount / 100 * profitability} rose")
+                elif arb_side.is_buy is True and self.get_previous_side_trade_buy() is not True and profitability > 0.5:
                     self.logger().info(f"start buy tokens")
                     place_order_fn = self.buy_with_specific_market
                     self.log_with_clock(logging.INFO,
@@ -242,8 +244,10 @@ class CbsStrategy(StrategyPyBase):
                                               )
                     self._first_order_id = order_id
                     self.is_previous_side_trade_buy(True)
+                    self.previuos_trade_price(arb_side.order_price)
                     self._first_order_done_event = asyncio.Event()
-                    self.logger().info(f"finish buy tokens in amount  {arb_side.amount / 100 * profitability} ")
+                    self.logger().info(
+                        f"finish buy tokens with the profitability in {profitability} amount {arb_side.amount / 100 * profitability} rose")
 
     def ready_for_new_arb_trades(self) -> bool:
         """
@@ -254,7 +258,6 @@ class CbsStrategy(StrategyPyBase):
             if len(self.market_info_to_active_orders.get(market_info, [])) > 0:
                 return False
         return True
-
 
     async def format_status(self) -> str:
         """
@@ -366,4 +369,3 @@ class CbsStrategy(StrategyPyBase):
         if self._uniswap is None:
             self._uniswap = UniswapConnector([f"{quote}-WETH"], "", None)
         return await self._uniswap.get_quote_price(f"{quote}-WETH", True, 1)
-
