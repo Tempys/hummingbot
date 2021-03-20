@@ -19,8 +19,8 @@ import decimal
 NaN = float("nan")
 s_decimal_zero = Decimal(0)
 cbs_logger = None
-is_previous_side_trade_buy = False
-previuos_trade_price = decimal.Decimal('0')
+#is_previous_side_trade_buy = True
+#previuos_trade_price = decimal.Decimal('59079.27')
 
 
 class CbsStrategy(StrategyPyBase):
@@ -30,25 +30,25 @@ class CbsStrategy(StrategyPyBase):
     If presents, the strategy submits taker orders to both market.
     """
 
-    @classmethod
-    def get_previuos_trade_price(cls):
-        global previuos_trade_price
-        return previuos_trade_price
+    #@classmethod
+    #def get_previuos_trade_price(cls):
+    #    global previuos_trade_price
+    #    return previuos_trade_price
 
-    @classmethod
-    def previuos_trade_price(cls, value):
-        global previuos_trade_price
-        previuos_trade_price = value
-
-    @classmethod
-    def get_previous_side_trade_buy(cls):
-        global is_previous_side_trade_buy
-        return is_previous_side_trade_buy
-
-    @classmethod
-    def is_previous_side_trade_buy(cls, value):
-        global is_previous_side_trade_buy
-        is_previous_side_trade_buy = value
+    #@classmethod
+    #def previuos_trade_price(cls, value):
+    #     global previuos_trade_price
+    #     previuos_trade_price = value
+    #
+    # @classmethod
+    # def get_previous_side_trade_buy(cls):
+    #     global is_previous_side_trade_buy
+    #     return is_previous_side_trade_buy
+    #
+    # @classmethod
+    # def is_previous_side_trade_buy(cls, value):
+    #     global is_previous_side_trade_buy
+    #     is_previous_side_trade_buy = value
 
     @classmethod
     def logger(cls) -> HummingbotLogger:
@@ -60,7 +60,10 @@ class CbsStrategy(StrategyPyBase):
     def __init__(self,
                  market_info_1: MarketTradingPairTuple,
                  order_amount: Decimal,
-                 status_report_interval: float = 900):
+                 status_report_interval: float = 900,
+                 is_previous_side_trade_buy: bool = True,
+                 previuos_trade_price: Decimal = Decimal('0')
+                 ):
         """
         :param market_info_1: The first market
         :param order_amount: The order amount
@@ -73,6 +76,8 @@ class CbsStrategy(StrategyPyBase):
         super().__init__()
         self._market_info_1 = market_info_1
         self._order_amount = order_amount
+        self._is_previous_side_trade_buy = is_previous_side_trade_buy
+        self._previuos_trade_price = previuos_trade_price
         self._last_no_arb_reported = 0
         self._arb_proposals = None
         self._all_markets_ready = False
@@ -87,7 +92,6 @@ class CbsStrategy(StrategyPyBase):
         self._uniswap = None
         self._quote_eth_rate_fetch_loop_task = None
         self._market_1_quote_eth_rate = None
-        self._is_previous_side_trade_buy = True
 
     @property
     def order_amount(self) -> Decimal:
@@ -96,6 +100,22 @@ class CbsStrategy(StrategyPyBase):
     @order_amount.setter
     def order_amount(self, value):
         self._order_amount = value
+
+    # @property
+    # def is_previous_side_trade_buy(self) -> bool:
+    #     return self._is_previous_side_trade_buy
+    #
+    # @is_previous_side_trade_buy.setter
+    # def is_previous_side_trade_buy(self, value):
+    #     self._is_previous_side_trade_buy = value
+    #
+    # @property
+    # def previuos_trade_price(self) -> Decimal:
+    #     return self._previuos_trade_price
+    #
+    # @previuos_trade_price.setter
+    # def previuos_trade_price(self, value):
+    #     self._previuos_trade_price = value
 
     @property
     def market_info_to_active_orders(self) -> Dict[MarketTradingPairTuple, List[LimitOrder]]:
@@ -133,7 +153,7 @@ class CbsStrategy(StrategyPyBase):
         arbitrage.
         """
         self.cbs_proposals = await create_cbs_proposals(self._market_info_1, self._order_amount,
-                                                        self.get_previous_side_trade_buy())
+                                                        self._is_previous_side_trade_buy)
 
         self.apply_slippage_buffers(self.cbs_proposals)
         # self.apply_budget_constraint(self.cbs_proposals)
@@ -210,11 +230,11 @@ class CbsStrategy(StrategyPyBase):
                         continue
 
                 # TODO: remove global variables
-                prev_price = self.get_previuos_trade_price()
-                profitability = self.profit_pct(prev_price, arb_side.order_price, self.get_previous_side_trade_buy())
+                prev_price = self._previuos_trade_price
+                profitability = self.profit_pct(prev_price, arb_side.order_price, self._is_previous_side_trade_buy)
                 self.logger().info(
-                    f"for amount: {arb_side.amount} and price {arb_side.order_price} calculates possible profitabity: {profitability} % ,  (side is buy : {arb_side.is_buy} ), previous side trade: {self.get_previous_side_trade_buy()}, ")
-                if arb_side.is_buy is not True and arb_side.order_price > 0.17 and self.get_previous_side_trade_buy() and profitability > 0.5:
+                    f"for amount: {arb_side.amount} and price {arb_side.order_price} calculates possible profitabity: {profitability} % ,  (side is buy : {arb_side.is_buy} ), previous side trade: {self._is_previous_side_trade_buy}, ")
+                if arb_side.is_buy is not True and arb_side.order_price > 0.17 and self._is_previous_side_trade_buy and profitability > 1:
                     self.logger().info(f"start sell tokens")
                     place_order_fn = self.sell_with_specific_market
                     self.log_with_clock(logging.INFO,
@@ -226,12 +246,12 @@ class CbsStrategy(StrategyPyBase):
                                               arb_side.order_price,
                                               )
                     self._first_order_id = order_id
-                    self.is_previous_side_trade_buy(False)
-                    self.previuos_trade_price(arb_side.order_price)
+                    self._is_previous_side_trade_buy = False
+                    self._previuos_trade_price = arb_side.order_price
                     self._first_order_done_event = asyncio.Event()
                     self.logger().info(
                         f"finish sell tokens with the profitability in {profitability} amount {arb_side.amount / 100 * profitability} rose")
-                elif arb_side.is_buy is True and self.get_previous_side_trade_buy() is not True and profitability > 0.5:
+                elif arb_side.is_buy is True and self._is_previous_side_trade_buy is not True and profitability > 1:
                     self.logger().info(f"start buy tokens")
                     place_order_fn = self.buy_with_specific_market
                     self.log_with_clock(logging.INFO,
@@ -243,8 +263,8 @@ class CbsStrategy(StrategyPyBase):
                                               arb_side.order_price,
                                               )
                     self._first_order_id = order_id
-                    self.is_previous_side_trade_buy(True)
-                    self.previuos_trade_price(arb_side.order_price)
+                    self._is_previous_side_trade_buy = True
+                    self._previuos_trade_price = arb_side.order_price
                     self._first_order_done_event = asyncio.Event()
                     self.logger().info(
                         f"finish buy tokens with the profitability in {profitability} amount {arb_side.amount / 100 * profitability} rose")
@@ -308,13 +328,13 @@ class CbsStrategy(StrategyPyBase):
         self.first_order_done(order_completed_event, True)
 
     def did_fail_order(self, order_failed_event):
-        self.first_order_done(order_failed_event, False)
+        self.first_order_done(order_failed_event, True)
 
     def did_cancel_order(self, cancelled_event):
-        self.first_order_done(cancelled_event, False)
+        self.first_order_done(cancelled_event, True)
 
     def did_expire_order(self, expired_event):
-        self.first_order_done(expired_event, False)
+        self.first_order_done(expired_event, True)
 
     def first_order_done(self, event, succeeded):
         if self._first_order_done_event is not None and event.order_id == self._first_order_id:
