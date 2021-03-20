@@ -10,3 +10,7 @@ strategy: null
 connector_1: null
 market_1: null
 order_amount: null
+is_previous_side_trade_buy: null
+previuos_trade_price: null
+min_buy_profitability: null
+min_sell_profitability: null

@@ -31,6 +31,11 @@ def is_previous_side_trade_buy_prompt() -> bool:
 def previuos_trade_price_prompt() -> str:
     return f"Please enter the previous trade price? >>> "
 
+def min_buy_profitability_prompt() -> str:
+    return f"Please enter the min_buy_profitability in %? >>> "
+
+def min_sell_profitability_prompt() -> str:
+    return f"Please enter the min_sell_profitability in %? >>> "
 
 cbs_config_map = {
     "strategy": ConfigVar(
@@ -61,6 +66,16 @@ cbs_config_map = {
     "previuos_trade_price": ConfigVar(
         key="previuos_trade_price",
         prompt=previuos_trade_price_prompt,
+        type_str="decimal",
+        prompt_on_new=True),
+    "min_buy_profitability": ConfigVar(
+        key="min_buy_profitability",
+        prompt=min_buy_profitability_prompt,
+        type_str="decimal",
+        prompt_on_new=True),
+    "min_sell_profitability": ConfigVar(
+        key="min_sell_profitability",
+        prompt=min_sell_profitability_prompt,
         type_str="decimal",
         prompt_on_new=True),
 }

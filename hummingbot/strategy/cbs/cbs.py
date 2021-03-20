@@ -62,7 +62,9 @@ class CbsStrategy(StrategyPyBase):
                  order_amount: Decimal,
                  status_report_interval: float = 900,
                  is_previous_side_trade_buy: bool = True,
-                 previuos_trade_price: Decimal = Decimal('0')
+                 previuos_trade_price: Decimal = Decimal('0'),
+                 min_buy_profitability: Decimal = Decimal('0.2'),
+                 min_sell_profitability: Decimal = Decimal('0.2'),
                  ):
         """
         :param market_info_1: The first market
@@ -78,6 +80,8 @@ class CbsStrategy(StrategyPyBase):
         self._order_amount = order_amount
         self._is_previous_side_trade_buy = is_previous_side_trade_buy
         self._previuos_trade_price = previuos_trade_price
+        self._min_buy_profitability = min_buy_profitability
+        self._min_sell_profitability = min_sell_profitability
         self._last_no_arb_reported = 0
         self._arb_proposals = None
         self._all_markets_ready = False
@@ -159,7 +163,7 @@ class CbsStrategy(StrategyPyBase):
         # self.apply_budget_constraint(self.cbs_proposals)
 
         await self.execute_arb_proposals(self.cbs_proposals)
-        await asyncio.sleep(10)
+        await asyncio.sleep(30)
 
     def apply_budget_constraint(self, arb_proposals: List[CbsProposal]):
         """
@@ -234,7 +238,7 @@ class CbsStrategy(StrategyPyBase):
                 profitability = self.profit_pct(prev_price, arb_side.order_price, self._is_previous_side_trade_buy)
                 self.logger().info(
                     f"for amount: {arb_side.amount} and price {arb_side.order_price} calculates possible profitabity: {profitability} % ,  (side is buy : {arb_side.is_buy} ), previous side trade: {self._is_previous_side_trade_buy}, ")
-                if arb_side.is_buy is not True and arb_side.order_price > 0.17 and self._is_previous_side_trade_buy and profitability > 1:
+                if arb_side.is_buy is not True and arb_side.order_price > 0.17 and self._is_previous_side_trade_buy and profitability > self._min_sell_profitability:
                     self.logger().info(f"start sell tokens")
                     place_order_fn = self.sell_with_specific_market
                     self.log_with_clock(logging.INFO,
@@ -251,7 +255,7 @@ class CbsStrategy(StrategyPyBase):
                     self._first_order_done_event = asyncio.Event()
                     self.logger().info(
                         f"finish sell tokens with the profitability in {profitability} amount {arb_side.amount / 100 * profitability} rose")
-                elif arb_side.is_buy is True and self._is_previous_side_trade_buy is not True and profitability > 1:
+                elif arb_side.is_buy is True and self._is_previous_side_trade_buy is not True and profitability > self._min_buy_profitability:
                     self.logger().info(f"start buy tokens")
                     place_order_fn = self.buy_with_specific_market
                     self.log_with_clock(logging.INFO,
