@@ -14,11 +14,16 @@ from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.client.settings import ETH_WALLET_CONNECTORS
 from hummingbot.connector.connector.uniswap.uniswap_connector import UniswapConnector
 from .utils import create_cbs_proposals, CbsProposal
+from hummingbot.client.hummingbot_application import HummingbotApplication
+from hummingbot.client.settings import CONF_FILE_PATH
+
+import yaml
 import decimal
 
 NaN = float("nan")
 s_decimal_zero = Decimal(0)
 cbs_logger = None
+
 #is_previous_side_trade_buy = True
 #previuos_trade_price = decimal.Decimal('59079.27')
 
@@ -96,6 +101,8 @@ class CbsStrategy(StrategyPyBase):
         self._uniswap = None
         self._quote_eth_rate_fetch_loop_task = None
         self._market_1_quote_eth_rate = None
+        self._sleep_timeout = 30
+        self._previous_profitability = 0
 
     @property
     def order_amount(self) -> Decimal:
@@ -135,6 +142,16 @@ class CbsStrategy(StrategyPyBase):
                 return False
         return True
 
+    def set_price_in_file(self,price, isbuy):
+        hb = HummingbotApplication.main_application()
+        file_name = CONF_FILE_PATH + hb.strategy_file_name
+        with open(file_name) as f:
+            doc = yaml.safe_load(f)
+        doc['previuos_trade_price'] = float(price)
+        doc['is_previous_side_trade_buy'] = isbuy
+        with open(file_name, 'w') as f:
+            yaml.safe_dump(doc, f, default_flow_style=False)
+
     def tick(self, timestamp: float):
         """
         Clock tick entry point, is run every second (on normal tick setting).
@@ -162,8 +179,9 @@ class CbsStrategy(StrategyPyBase):
         self.apply_slippage_buffers(self.cbs_proposals)
         # self.apply_budget_constraint(self.cbs_proposals)
 
+
         await self.execute_arb_proposals(self.cbs_proposals)
-        await asyncio.sleep(30)
+        await asyncio.sleep(self._sleep_timeout)
 
     def apply_budget_constraint(self, arb_proposals: List[CbsProposal]):
         """
@@ -216,6 +234,18 @@ class CbsStrategy(StrategyPyBase):
         self._first_order_id = order_id
         self._first_order_done_event = asyncio.Event()
 
+    def is_grow_profit(self,current_profitability,previous_profitablity):
+        if previous_profitablity > current_profitability:
+           self._previous_profitability= current_profitability
+           self._sleep_timeout = 30
+           self.logger().info(f"current Profitablity decrease by { current_profitability - previous_profitablity}")
+           return False
+        else:
+           self._sleep_timeout = 5
+           self._previous_profitability= current_profitability
+           self.logger().info(f"current Profitablity encrease by {current_profitability - previous_profitablity}")
+           return True
+
     async def execute_arb_proposals(self, arb_proposals: List[CbsProposal]):
         """
         Execute both sides of the arbitrage trades. If concurrent_orders_submission is False, it will wait for the
@@ -233,11 +263,10 @@ class CbsStrategy(StrategyPyBase):
                         self._first_order_succeeded = None
                         continue
 
-                # TODO: remove global variables
                 prev_price = self._previuos_trade_price
                 profitability = self.profit_pct(prev_price, arb_side.order_price, self._is_previous_side_trade_buy)
-                self.logger().info(
-                    f"for amount: {arb_side.amount} and price {arb_side.order_price} calculates possible profitabity: {profitability} % ,  (side is buy : {arb_side.is_buy} ), previous side trade: {self._is_previous_side_trade_buy}, ")
+                if self.is_grow_profit(profitability, self._previous_profitability): continue
+                self.logger().info(f"for amount: {arb_side.amount} and price {arb_side.order_price} calculates possible profitabity: {profitability} % ,  (side is buy : {arb_side.is_buy} ), previous side trade: {self._is_previous_side_trade_buy}, ")
                 if arb_side.is_buy is not True and arb_side.order_price > 0.17 and self._is_previous_side_trade_buy and profitability > self._min_sell_profitability:
                     self.logger().info(f"start sell tokens")
                     place_order_fn = self.sell_with_specific_market
@@ -252,6 +281,8 @@ class CbsStrategy(StrategyPyBase):
                     self._first_order_id = order_id
                     self._is_previous_side_trade_buy = False
                     self._previuos_trade_price = arb_side.order_price
+                    self._previous_profitability = 0
+                    self.set_price_in_file(self._previuos_trade_price, self._is_previous_side_trade_buy)
                     self._first_order_done_event = asyncio.Event()
                     self.logger().info(
                         f"finish sell tokens with the profitability in {profitability} amount {arb_side.amount / 100 * profitability} rose")
@@ -262,13 +293,15 @@ class CbsStrategy(StrategyPyBase):
                                         f"Logging order for {arb_side.amount} {arb_side.market_info.base_asset} "
                                         f"at {arb_side.market_info.market.display_name} at {arb_side.order_price} price")
                     order_id = place_order_fn(arb_side.market_info,
-                                              arb_side.amount,
+                                              (arb_side.amount*Decimal('1.002')),
                                               arb_side.market_info.market.get_taker_order_type(),
                                               arb_side.order_price,
                                               )
                     self._first_order_id = order_id
                     self._is_previous_side_trade_buy = True
                     self._previuos_trade_price = arb_side.order_price
+                    self._previous_profitability = 0
+                    self.set_price_in_file(self._previuos_trade_price, self._is_previous_side_trade_buy)
                     self._first_order_done_event = asyncio.Event()
                     self.logger().info(
                         f"finish buy tokens with the profitability in {profitability} amount {arb_side.amount / 100 * profitability} rose")
@@ -332,7 +365,7 @@ class CbsStrategy(StrategyPyBase):
         self.first_order_done(order_completed_event, True)
 
     def did_fail_order(self, order_failed_event):
-        self.first_order_done(order_failed_event, True)
+        self.first_order_done(order_failed_event, False)
 
     def did_cancel_order(self, cancelled_event):
         self.first_order_done(cancelled_event, True)
